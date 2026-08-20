@@ -9,8 +9,8 @@ const DEFAULT_ORDER_LIMITS = {
   unitBased: { enabled: false, minUnits: 0 },
 };
 
-async function ensureBaseGroup() {
-  let base = await CustomerGroup.findOne({ isBase: true });
+async function ensureBaseGroup(shop) {
+  let base = await CustomerGroup.findOne({ isBase: true, shop });
   if (!base) {
     base = await CustomerGroup.create({
       name: "Base customer group",
@@ -18,45 +18,54 @@ async function ensureBaseGroup() {
       shopifyTag: undefined,
       paymentMethods: DEFAULT_PAYMENT_METHODS,
       orderLimits: DEFAULT_ORDER_LIMITS,
+      shop,
     });
   }
   return base;
 }
 
-async function applyGroupToMatchingCustomers(group, base) {
-  const effectivePriceList = group.priceList || base.priceList || null;
-  if (!effectivePriceList) return { matched: 0, shopifySync: { attempted: false } };
+// Recomputes group/price-list assignment for every customer in the shop from
+// scratch, instead of only adding matches — a customer whose tag no longer
+// matches any group's shopifyTag is unassigned (falls back to the base
+// group) rather than keeping a stale assignment. Called after any customer
+// sync (webhook or bulk) or whenever a group is created/edited, since either
+// can change which group a customer currently belongs to.
+async function applyAllGroupsToCustomers(shop) {
+  const base = await ensureBaseGroup(shop);
+  const groups = await CustomerGroup.find({ isBase: false, shop });
+  const customers = await Customer.find({ shop });
 
-  // Base group only fills in customers nobody has assigned yet — a specific
-  // group's own assignment always takes priority over the base default.
-  const filter = group.isBase ? { priceList: null } : { tags: group.shopifyTag };
-  const result = await Customer.updateMany(filter, { $set: { priceList: effectivePriceList } });
+  const touchedPriceListIds = new Set();
 
-  const priceList = await PriceList.findById(effectivePriceList);
-  const shopifySync = priceList ? await autoSyncToShopify(priceList) : { attempted: false };
+  for (const customer of customers) {
+    const matchedGroup = groups.find((g) => customer.tags.includes(g.shopifyTag));
+    const targetGroup = matchedGroup || base;
+    const targetPriceList = targetGroup.priceList || base.priceList || null;
+    const groupId = matchedGroup ? matchedGroup._id : null;
 
-  return { matched: result.modifiedCount, shopifySync };
-}
+    const changed =
+      String(customer.customerGroup || "") !== String(groupId || "") ||
+      String(customer.priceList || "") !== String(targetPriceList || "");
 
-// Re-runs tag-based group matching for every group against current customer
-// tags. Called after any customer sync (webhook or bulk) so a customer newly
-// tagged in Shopify gets their price list — and the matching Shopify discount
-// segment — without the merchant having to re-save a customer group by hand.
-async function applyAllGroupsToCustomers() {
-  const base = await ensureBaseGroup();
-  const groups = await CustomerGroup.find({ isBase: false });
+    if (changed) {
+      customer.customerGroup = groupId;
+      customer.priceList = targetPriceList;
+      await customer.save();
+    }
+
+    if (targetPriceList) touchedPriceListIds.add(String(targetPriceList));
+  }
 
   const results = [];
-  for (const group of groups) {
-    results.push(await applyGroupToMatchingCustomers(group, base));
+  for (const priceListId of touchedPriceListIds) {
+    const priceList = await PriceList.findOne({ _id: priceListId, shop });
+    results.push(priceList ? await autoSyncToShopify(priceList) : { attempted: false });
   }
-  results.push(await applyGroupToMatchingCustomers(base, base));
 
   return results;
 }
 
 module.exports = {
   ensureBaseGroup,
-  applyGroupToMatchingCustomers,
   applyAllGroupsToCustomers,
 };

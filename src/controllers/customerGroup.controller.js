@@ -1,9 +1,6 @@
 const CustomerGroup = require("../models/customerGroup.model");
 const Customer = require("../models/customer.model");
-const {
-  ensureBaseGroup,
-  applyGroupToMatchingCustomers,
-} = require("../services/customerGroup.service");
+const { ensureBaseGroup, applyAllGroupsToCustomers } = require("../services/customerGroup.service");
 
 const DEFAULT_PAYMENT_METHODS = { invoice: false, onAccount: false, cardAtCheckout: false };
 const DEFAULT_ORDER_LIMITS = {
@@ -23,11 +20,18 @@ function withEffectiveSettings(group, base) {
 
 async function getCustomerGroups(req, res, next) {
   try {
-    const base = await ensureBaseGroup();
-    const groups = await CustomerGroup.find().populate("priceList", "name").sort({ isBase: -1, createdAt: -1 });
+    const shop = req.user.shop;
+    const base = await ensureBaseGroup(shop);
+    const groups = await CustomerGroup.find({ shop })
+      .populate("priceList", "name")
+      .sort({ isBase: -1, createdAt: -1 });
 
     const counts = await Promise.all(
-      groups.map((g) => (g.isBase ? Customer.countDocuments() : Customer.countDocuments({ tags: g.shopifyTag })))
+      groups.map((g) =>
+        g.isBase
+          ? Customer.countDocuments({ shop })
+          : Customer.countDocuments({ shop, tags: g.shopifyTag })
+      )
     );
 
     const populatedBase = groups.find((g) => g.isBase) || (await base.populate("priceList", "name"));
@@ -42,8 +46,12 @@ async function getCustomerGroups(req, res, next) {
 
 async function getCustomerGroup(req, res, next) {
   try {
-    const base = await ensureBaseGroup();
-    const group = await CustomerGroup.findById(req.params.id).populate("priceList", "name");
+    const shop = req.user.shop;
+    const base = await ensureBaseGroup(shop);
+    const group = await CustomerGroup.findOne({ _id: req.params.id, shop }).populate(
+      "priceList",
+      "name"
+    );
 
     if (!group) {
       return res.status(404).json({ message: "Customer group not found" });
@@ -51,8 +59,8 @@ async function getCustomerGroup(req, res, next) {
 
     const populatedBase = group.isBase ? group : await base.populate("priceList", "name");
     const customers = group.isBase
-      ? await Customer.find({}, "name email")
-      : await Customer.find({ tags: group.shopifyTag }, "name email");
+      ? await Customer.find({ shop }, "name email")
+      : await Customer.find({ shop, tags: group.shopifyTag }, "name email");
 
     res.status(200).json({ ...withEffectiveSettings(group, populatedBase), customers });
   } catch (err) {
@@ -62,6 +70,7 @@ async function getCustomerGroup(req, res, next) {
 
 async function createCustomerGroup(req, res, next) {
   try {
+    const shop = req.user.shop;
     const { name, shopifyTag, priceList, paymentMethods, orderLimits } = req.body;
     const group = await CustomerGroup.create({
       name,
@@ -69,12 +78,12 @@ async function createCustomerGroup(req, res, next) {
       priceList: priceList || null,
       paymentMethods: paymentMethods || null,
       orderLimits: orderLimits || null,
+      shop,
     });
 
-    const base = await ensureBaseGroup();
-    const { matched, shopifySync } = await applyGroupToMatchingCustomers(group, base);
+    const groupSync = await applyAllGroupsToCustomers(shop);
 
-    res.status(201).json({ ...group.toObject(), matchedCustomers: matched, shopifySync });
+    res.status(201).json({ ...group.toObject(), groupSync });
   } catch (err) {
     next(err);
   }
@@ -82,8 +91,9 @@ async function createCustomerGroup(req, res, next) {
 
 async function updateCustomerGroup(req, res, next) {
   try {
+    const shop = req.user.shop;
     const { name, shopifyTag, priceList, paymentMethods, orderLimits } = req.body;
-    const existing = await CustomerGroup.findById(req.params.id);
+    const existing = await CustomerGroup.findOne({ _id: req.params.id, shop });
 
     if (!existing) {
       return res.status(404).json({ message: "Customer group not found" });
@@ -92,18 +102,14 @@ async function updateCustomerGroup(req, res, next) {
     const update = { name, priceList: priceList || null, paymentMethods: paymentMethods || null, orderLimits: orderLimits || null };
     if (!existing.isBase) update.shopifyTag = shopifyTag;
 
-    const group = await CustomerGroup.findByIdAndUpdate(req.params.id, update, {
+    const group = await CustomerGroup.findOneAndUpdate({ _id: req.params.id, shop }, update, {
       new: true,
       runValidators: true,
     });
 
-    const base = await ensureBaseGroup();
-    const { matched, shopifySync } = await applyGroupToMatchingCustomers(
-      group,
-      group.isBase ? group : base,
-    );
+    const groupSync = await applyAllGroupsToCustomers(shop);
 
-    res.status(200).json({ ...group.toObject(), matchedCustomers: matched, shopifySync });
+    res.status(200).json({ ...group.toObject(), groupSync });
   } catch (err) {
     next(err);
   }
@@ -111,7 +117,7 @@ async function updateCustomerGroup(req, res, next) {
 
 async function deleteCustomerGroup(req, res, next) {
   try {
-    const group = await CustomerGroup.findById(req.params.id);
+    const group = await CustomerGroup.findOne({ _id: req.params.id, shop: req.user.shop });
 
     if (!group) {
       return res.status(404).json({ message: "Customer group not found" });
@@ -122,6 +128,8 @@ async function deleteCustomerGroup(req, res, next) {
     }
 
     await group.deleteOne();
+
+    await applyAllGroupsToCustomers(req.user.shop);
 
     res.status(200).json({ message: "Customer group deleted" });
   } catch (err) {

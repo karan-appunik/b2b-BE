@@ -37,8 +37,14 @@ const priceListSchema = new mongoose.Schema(
     shopifySegmentId: { type: String, trim: true },
     shopifyPushedCustomerIds: { type: [String], default: [] },
     shopifyItemDiscounts: { type: [shopifyItemDiscountSchema], default: [] },
+    shop: { type: String, required: true, trim: true, index: true },
   },
   { timestamps: true }
+);
+
+priceListSchema.index(
+  { shop: 1, handle: 1 },
+  { unique: true, partialFilterExpression: { handle: { $exists: true } } }
 );
 
 module.exports = mongoose.model("PriceList", priceListSchema);

@@ -5,6 +5,10 @@ function protectInternal(req, res, next) {
     return res.status(401).json({ message: "Not authorized" });
   }
 
+  if (!req.body.shop || typeof req.body.shop !== "string") {
+    return res.status(400).json({ message: "shop is required" });
+  }
+
   next();
 }
 

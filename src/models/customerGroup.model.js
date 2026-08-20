@@ -38,8 +38,14 @@ const customerGroupSchema = new mongoose.Schema(
     // null means "inherit from the base group" for non-base groups.
     paymentMethods: { type: paymentMethodsSchema, default: null },
     orderLimits: { type: orderLimitsSchema, default: null },
+    shop: { type: String, required: true, trim: true, index: true },
   },
   { timestamps: true }
+);
+
+customerGroupSchema.index(
+  { shop: 1, isBase: 1 },
+  { unique: true, partialFilterExpression: { isBase: true } }
 );
 
 module.exports = mongoose.model("CustomerGroup", customerGroupSchema);

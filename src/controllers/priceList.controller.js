@@ -9,22 +9,27 @@ const priceListService = require("../services/priceList.service");
 // dynamically). admin-frontend/vite.config.ts writes its current port here on
 // every start, so we read it fresh on every push instead of relying on a
 // hardcoded ADMIN_FRONTEND_URL in .env that goes stale between restarts.
+// Only trust this file outside production — a deployed backend must always
+// use ADMIN_FRONTEND_URL.
 function getAdminFrontendUrl() {
-  try {
-    const filePath = path.resolve(__dirname, "../../.dev-admin-url.json");
-    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    if (data.url) return data.url;
-  } catch {
-    // fall through to env var
+  if (process.env.NODE_ENV !== "production") {
+    try {
+      const filePath = path.resolve(__dirname, "../../.dev-admin-url.json");
+      const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (data.url) return data.url;
+    } catch {
+      // fall through to env var
+    }
   }
   return process.env.ADMIN_FRONTEND_URL;
 }
 
 async function getPriceLists(req, res, next) {
   try {
-    const priceLists = await PriceList.find().sort({ createdAt: -1 });
+    const shop = req.user.shop;
+    const priceLists = await PriceList.find({ shop }).sort({ createdAt: -1 });
     const customerCounts = await Customer.aggregate([
-      { $match: { priceList: { $ne: null } } },
+      { $match: { shop, priceList: { $ne: null } } },
       { $group: { _id: "$priceList", count: { $sum: 1 } } },
     ]);
     const countsById = Object.fromEntries(
@@ -52,7 +57,8 @@ async function getPriceLists(req, res, next) {
 
 async function getPriceList(req, res, next) {
   try {
-    const priceList = await PriceList.findById(req.params.id).populate(
+    const shop = req.user.shop;
+    const priceList = await PriceList.findOne({ _id: req.params.id, shop }).populate(
       "items.product",
       "name sku msrp"
     );
@@ -61,7 +67,7 @@ async function getPriceList(req, res, next) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    const customers = await Customer.find({ priceList: priceList._id });
+    const customers = await Customer.find({ shop, priceList: priceList._id });
 
     res.status(200).json({ ...priceList.toObject(), customers });
   } catch (err) {
@@ -90,6 +96,7 @@ async function createPriceList(req, res, next) {
       status,
       pricingType,
       automaticPricing,
+      shop: req.user.shop,
     });
 
     res.status(201).json(priceList);
@@ -101,8 +108,8 @@ async function createPriceList(req, res, next) {
 async function updatePriceList(req, res, next) {
   try {
     const { name, description, status, pricingType, automaticPricing } = req.body;
-    const priceList = await PriceList.findByIdAndUpdate(
-      req.params.id,
+    const priceList = await PriceList.findOneAndUpdate(
+      { _id: req.params.id, shop: req.user.shop },
       { name, description, status, pricingType, automaticPricing },
       { new: true, runValidators: true }
     );
@@ -119,13 +126,14 @@ async function updatePriceList(req, res, next) {
 
 async function deletePriceList(req, res, next) {
   try {
-    const priceList = await PriceList.findByIdAndDelete(req.params.id);
+    const shop = req.user.shop;
+    const priceList = await PriceList.findOneAndDelete({ _id: req.params.id, shop });
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    await priceListService.cascadeUnassignOnDelete(priceList._id);
+    await priceListService.cascadeUnassignOnDelete(priceList._id, shop);
 
     res.status(200).json({ message: "Price list deleted" });
   } catch (err) {
@@ -141,7 +149,7 @@ async function upsertItems(req, res, next) {
       return res.status(400).json({ message: "items must be an array" });
     }
 
-    const priceList = await priceListService.replaceItems(req.params.id, items);
+    const priceList = await priceListService.replaceItems(req.params.id, items, req.user.shop);
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
@@ -155,8 +163,8 @@ async function upsertItems(req, res, next) {
   }
 }
 
-async function performShopifyPush(priceListId) {
-  const priceList = await PriceList.findById(priceListId).populate(
+async function performShopifyPush(priceListId, shop) {
+  const priceList = await PriceList.findOne({ _id: priceListId, shop }).populate(
     "items.product",
     "shopifyVariantId msrp name",
   );
@@ -208,6 +216,7 @@ async function performShopifyPush(priceListId) {
     .filter(Boolean);
 
   const customers = await Customer.find({
+    shop: priceList.shop,
     priceList: priceList._id,
     shopifyCustomerId: { $exists: true, $ne: null },
   });
@@ -230,6 +239,7 @@ async function performShopifyPush(priceListId) {
       "x-internal-api-key": process.env.INTERNAL_API_KEY,
     },
     body: JSON.stringify({
+      shop: priceList.shop,
       priceListName: priceList.name,
       currency: priceList.currency,
       tag: `sparklayer-${priceList.handle}`,
@@ -270,7 +280,7 @@ async function autoSyncToShopify(priceList) {
     return { attempted: false };
   }
 
-  const result = await performShopifyPush(priceList._id);
+  const result = await performShopifyPush(priceList._id, priceList.shop);
 
   if (!result.ok && result.statusCode === 400 && /linked to Shopify/.test(result.message)) {
     return { attempted: false };
@@ -281,6 +291,7 @@ async function autoSyncToShopify(priceList) {
 
 async function bulkImportPriceLists(req, res, next) {
   try {
+    const shop = req.user.shop;
     const { rows } = req.body;
 
     if (!Array.isArray(rows) || rows.length === 0) {
@@ -296,7 +307,7 @@ async function bulkImportPriceLists(req, res, next) {
     }
 
     const skus = [...new Set(validRows.map((r) => r.sku))];
-    const products = await Product.find({ sku: { $in: skus } });
+    const products = await Product.find({ sku: { $in: skus }, shop });
     const productIdBySku = new Map(products.map((p) => [p.sku, String(p._id)]));
 
     const rowsBySlug = new Map();
@@ -312,7 +323,7 @@ async function bulkImportPriceLists(req, res, next) {
     const affectedPriceLists = [];
 
     for (const [handle, priceListRows] of rowsBySlug) {
-      let priceList = await PriceList.findOne({ handle });
+      let priceList = await PriceList.findOne({ handle, shop });
 
       if (!priceList) {
         priceList = await PriceList.create({
@@ -321,6 +332,7 @@ async function bulkImportPriceLists(req, res, next) {
           currency: priceListRows[0].currency || "USD",
           status: "draft",
           pricingType: "manual",
+          shop,
         });
         priceListsCreated += 1;
       } else {
@@ -367,7 +379,7 @@ async function retryFailedShopifyPushes() {
   });
 
   for (const priceList of failed) {
-    const result = await performShopifyPush(priceList._id);
+    const result = await performShopifyPush(priceList._id, priceList.shop);
     if (result.ok) {
       console.log(`[priceList] retry push succeeded for "${priceList.name}"`);
     } else {
@@ -380,7 +392,7 @@ async function retryFailedShopifyPushes() {
 
 async function pushToShopify(req, res, next) {
   try {
-    const result = await performShopifyPush(req.params.id);
+    const result = await performShopifyPush(req.params.id, req.user.shop);
 
     if (!result.ok) {
       return res.status(result.statusCode).json({ message: result.message });
@@ -394,19 +406,20 @@ async function pushToShopify(req, res, next) {
 
 async function assignCustomers(req, res, next) {
   try {
+    const shop = req.user.shop;
     const { customerIds } = req.body;
 
     if (!Array.isArray(customerIds)) {
       return res.status(400).json({ message: "customerIds must be an array" });
     }
 
-    const priceList = await PriceList.findById(req.params.id);
+    const priceList = await PriceList.findOne({ _id: req.params.id, shop });
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    const customers = await priceListService.assignCustomers(req.params.id, customerIds);
+    const customers = await priceListService.assignCustomers(req.params.id, customerIds, shop);
     const shopifySync = await autoSyncToShopify(priceList);
 
     res.status(200).json({ customers, shopifySync });
