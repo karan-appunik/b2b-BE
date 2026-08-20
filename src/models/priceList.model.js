@@ -8,6 +8,14 @@ const priceListItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const shopifyItemDiscountSchema = new mongoose.Schema(
+  {
+    variantId: { type: String, trim: true, required: true },
+    shopifyDiscountId: { type: String, trim: true, required: true },
+  },
+  { _id: false }
+);
+
 const priceListSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -21,8 +29,22 @@ const priceListSchema = new mongoose.Schema(
       discountValue: { type: Number, default: 0, min: 0 },
     },
     items: { type: [priceListItemSchema], default: [] },
+    shopifyCatalogId: { type: String, trim: true },
+    shopifyPriceListId: { type: String, trim: true },
+    shopifyPushedAt: { type: Date },
+    shopifyPushError: { type: String, trim: true },
+    shopifyPushedVariantIds: { type: [String], default: [] },
+    shopifySegmentId: { type: String, trim: true },
+    shopifyPushedCustomerIds: { type: [String], default: [] },
+    shopifyItemDiscounts: { type: [shopifyItemDiscountSchema], default: [] },
+    shop: { type: String, required: true, trim: true, index: true },
   },
   { timestamps: true }
+);
+
+priceListSchema.index(
+  { shop: 1, handle: 1 },
+  { unique: true, partialFilterExpression: { handle: { $exists: true } } }
 );
 
 module.exports = mongoose.model("PriceList", priceListSchema);

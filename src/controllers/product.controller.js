@@ -2,7 +2,7 @@ const Product = require("../models/product.model");
 
 async function getProducts(req, res, next) {
   try {
-    const products = await Product.find().sort({ createdAt: -1 });
+    const products = await Product.find({ shop: req.user.shop }).sort({ createdAt: -1 });
     res.status(200).json(products);
   } catch (err) {
     next(err);
@@ -11,7 +11,7 @@ async function getProducts(req, res, next) {
 
 async function getProduct(req, res, next) {
   try {
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findOne({ _id: req.params.id, shop: req.user.shop });
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
@@ -26,7 +26,7 @@ async function getProduct(req, res, next) {
 async function createProduct(req, res, next) {
   try {
     const { name, sku, msrp } = req.body;
-    const product = await Product.create({ name, sku, msrp });
+    const product = await Product.create({ name, sku, msrp, shop: req.user.shop });
     res.status(201).json(product);
   } catch (err) {
     next(err);
@@ -36,8 +36,8 @@ async function createProduct(req, res, next) {
 async function updateProduct(req, res, next) {
   try {
     const { name, sku, msrp } = req.body;
-    const product = await Product.findByIdAndUpdate(
-      req.params.id,
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, shop: req.user.shop },
       { name, sku, msrp },
       { new: true, runValidators: true }
     );
@@ -54,7 +54,7 @@ async function updateProduct(req, res, next) {
 
 async function deleteProduct(req, res, next) {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    const product = await Product.findOneAndDelete({ _id: req.params.id, shop: req.user.shop });
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
@@ -66,4 +66,95 @@ async function deleteProduct(req, res, next) {
   }
 }
 
-module.exports = { getProducts, getProduct, createProduct, updateProduct, deleteProduct };
+async function bulkImportProducts(req, res, next) {
+  try {
+    const { products } = req.body;
+
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ message: "products must be a non-empty array" });
+    }
+
+    const shop = req.user?.shop || req.body.shop;
+
+    const ops = products
+      .filter((p) => p.sku && p.name && p.msrp !== undefined && !Number.isNaN(Number(p.msrp)))
+      .map((p) => {
+        const setFields = { name: p.name, sku: p.sku, msrp: Number(p.msrp), shop };
+        if (p.shopifyProductId) setFields.shopifyProductId = String(p.shopifyProductId);
+        if (p.shopifyVariantId) setFields.shopifyVariantId = String(p.shopifyVariantId);
+
+        return {
+          updateOne: {
+            filter: p.shopifyVariantId
+              ? { shopifyVariantId: String(p.shopifyVariantId), shop }
+              : { sku: p.sku, shop },
+            update: { $set: setFields },
+            upsert: true,
+          },
+        };
+      });
+
+    if (ops.length === 0) {
+      return res.status(400).json({ message: "No valid rows to import" });
+    }
+
+    const result = await Product.bulkWrite(ops, { ordered: false });
+
+    res.status(200).json({
+      received: products.length,
+      imported: ops.length,
+      created: result.upsertedCount,
+      updated: result.modifiedCount,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deleteProductsByShopifyProduct(req, res, next) {
+  try {
+    const { shopifyProductId, shop } = req.body;
+
+    if (!shopifyProductId) {
+      return res.status(400).json({ message: "shopifyProductId is required" });
+    }
+
+    const result = await Product.deleteMany({ shopifyProductId: String(shopifyProductId), shop });
+
+    res.status(200).json({ deleted: result.deletedCount });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function cleanupRemovedProducts(req, res, next) {
+  try {
+    const { activeVariantIds, shop } = req.body;
+
+    if (!Array.isArray(activeVariantIds)) {
+      return res.status(400).json({ message: "activeVariantIds must be an array" });
+    }
+
+    // Delete any product that has a shopifyProductId but is not in the active list
+    const result = await Product.deleteMany({
+      shop,
+      shopifyProductId: { $exists: true, $ne: null },
+      shopifyVariantId: { $nin: activeVariantIds },
+    });
+
+    res.status(200).json({ deleted: result.deletedCount });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  getProducts,
+  getProduct,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  bulkImportProducts,
+  deleteProductsByShopifyProduct,
+  cleanupRemovedProducts,
+};
