@@ -5,6 +5,11 @@ const Product = require("../models/product.model");
 const Customer = require("../models/customer.model");
 const priceListService = require("../services/priceList.service");
 
+// SparkLayer-style tag model: every B2B customer gets this fixed base tag
+// (granting wholesale pricing at checkout) plus their CustomerGroup's own
+// shopifyTag — not a tag per price list. See customerGroup.model.js.
+const B2B_BASE_TAG = "b2b";
+
 // admin-frontend's dev port changes on every restart (Shopify CLI assigns it
 // dynamically). admin-frontend/vite.config.ts writes its current port here on
 // every start, so we read it fresh on every push instead of relying on a
@@ -196,24 +201,7 @@ async function performShopifyPush(priceListId, shop) {
     amount: String(item.price),
   }));
 
-  const discountByVariant = new Map(
-    (priceList.shopifyItemDiscounts || []).map((d) => [d.variantId, d.shopifyDiscountId]),
-  );
-
-  const discountItems = pricedItems.map((item) => ({
-    variantId: item.product.shopifyVariantId,
-    productTitle: item.product.name,
-    discountAmount: Number((item.product.msrp - item.price).toFixed(2)),
-    shopifyDiscountId: discountByVariant.get(item.product.shopifyVariantId) || null,
-  }));
-
   const currentVariantIds = prices.map((p) => p.variantId);
-  const staleVariantIds = (priceList.shopifyPushedVariantIds || []).filter(
-    (id) => !currentVariantIds.includes(id),
-  );
-  const removedDiscountIds = staleVariantIds
-    .map((id) => discountByVariant.get(id))
-    .filter(Boolean);
 
   const customers = await Customer.find({
     shop: priceList.shop,
@@ -242,14 +230,11 @@ async function performShopifyPush(priceListId, shop) {
       shop: priceList.shop,
       priceListName: priceList.name,
       currency: priceList.currency,
-      tag: `sparklayer-${priceList.handle}`,
+      tag: B2B_BASE_TAG,
       prices,
       previousVariantIds: priceList.shopifyPushedVariantIds || [],
       addCustomerIds,
       removeCustomerIds,
-      shopifySegmentId: priceList.shopifySegmentId || null,
-      discountItems,
-      removedDiscountIds,
     }),
   });
 
@@ -261,13 +246,27 @@ async function performShopifyPush(priceListId, shop) {
     return { ok: false, statusCode: 400, message: priceList.shopifyPushError };
   }
 
+  // Customers whose tag add/remove call failed on Shopify's side aren't
+  // actually tagged yet — excluding them here (instead of trusting
+  // currentCustomerIds blindly) means the next push retries them, rather
+  // than silently treating a failed tag write as done forever.
+  const failedTagCustomerIds = new Set(result.failedTagCustomerIds || []);
+  if (failedTagCustomerIds.size > 0) {
+    console.error(
+      `[priceList] tag sync failed for ${failedTagCustomerIds.size} customer(s) on "${priceList.name}" — will retry on next push`,
+      [...failedTagCustomerIds],
+    );
+  }
+
   priceList.shopifyPushedVariantIds = currentVariantIds;
-  priceList.shopifyPushedCustomerIds = currentCustomerIds;
-  priceList.shopifySegmentId = result.shopifySegmentId || priceList.shopifySegmentId;
-  priceList.shopifyItemDiscounts = (result.itemDiscountIds || []).map((d) => ({
-    variantId: d.variantId,
-    shopifyDiscountId: d.shopifyDiscountId,
-  }));
+  priceList.shopifyPushedCustomerIds = currentCustomerIds.filter(
+    (id) => !failedTagCustomerIds.has(id),
+  );
+  // shopifySegmentId / shopifyItemDiscounts are no longer written — wholesale
+  // pricing is enforced at checkout time from the wholesale_price metafield
+  // (see apps.sparklayer.checkout.tsx) rather than a Shopify Segment +
+  // Automatic Discount. The schema fields are left in place as harmless
+  // legacy columns for price lists pushed before this change.
   priceList.shopifyPushedAt = new Date();
   priceList.shopifyPushError = undefined;
   await priceList.save();
