@@ -34,6 +34,11 @@ const priceListSchema = new mongoose.Schema(
     shopifyPushedAt: { type: Date },
     shopifyPushError: { type: String, trim: true },
     shopifyPushedVariantIds: { type: [String], default: [] },
+    // shopifySegmentId / shopifyItemDiscounts: legacy — no longer written by
+    // performShopifyPush (priceList.controller.js). Wholesale pricing is now
+    // enforced at checkout time from the wholesale_price metafield instead of
+    // a Shopify Segment + Automatic Discount. Left in place so price lists
+    // pushed before this change keep their historical values.
     shopifySegmentId: { type: String, trim: true },
     shopifyPushedCustomerIds: { type: [String], default: [] },
     shopifyItemDiscounts: { type: [shopifyItemDiscountSchema], default: [] },
