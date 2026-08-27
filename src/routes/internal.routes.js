@@ -5,10 +5,16 @@ const {
   deleteProductsByShopifyProduct,
   cleanupRemovedProducts,
 } = require("../controllers/product.controller");
+const { bulkImportOrders } = require("../controllers/order.controller");
 const {
   bulkImportCustomers,
   deleteCustomersByShopifyCustomer,
   cleanupRemovedCustomers,
+  getAgentContext,
+  searchB2bCustomers,
+  getOrderLimits,
+  getCreditInfo,
+  chargeCredit,
 } = require("../controllers/customer.controller");
 const { protectInternal } = require("../middleware/internal.middleware");
 
@@ -23,5 +29,12 @@ router.post("/products/cleanup", cleanupRemovedProducts);
 router.post("/customers/sync", bulkImportCustomers);
 router.post("/customers/delete-by-shopify-customer", deleteCustomersByShopifyCustomer);
 router.post("/customers/cleanup", cleanupRemovedCustomers);
+router.get("/customers/agent-context", getAgentContext);
+router.get("/customers/search", searchB2bCustomers);
+router.get("/customers/order-limits", getOrderLimits);
+router.get("/customers/credit", getCreditInfo);
+router.post("/customers/credit/charge", chargeCredit);
+
+router.post("/orders/sync", bulkImportOrders);
 
 module.exports = router;

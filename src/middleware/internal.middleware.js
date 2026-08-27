@@ -5,7 +5,11 @@ function protectInternal(req, res, next) {
     return res.status(401).json({ message: "Not authorized" });
   }
 
-  if (!req.body.shop || typeof req.body.shop !== "string") {
+  // POST routes send `shop` in the body; the read-only GET lookups
+  // (customer search, agent context) send it as a query param instead.
+  const shop = req.body?.shop || req.query?.shop;
+
+  if (!shop || typeof shop !== "string") {
     return res.status(400).json({ message: "shop is required" });
   }
 

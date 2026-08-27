@@ -3,10 +3,33 @@ const Customer = require("../models/customer.model");
 const PriceList = require("../models/priceList.model");
 const { autoSyncToShopify } = require("../controllers/priceList.controller");
 
-const DEFAULT_PAYMENT_METHODS = { invoice: false, onAccount: false, cardAtCheckout: false };
+const DEFAULT_PAYMENT_METHODS = {
+  invoice: false,
+  onAccount: false,
+  cardAtCheckout: false,
+  requestForQuote: false,
+};
 const DEFAULT_ORDER_LIMITS = {
-  valueBased: { enabled: false, minValue: 0 },
-  unitBased: { enabled: false, minUnits: 0 },
+  quantity: { min: null, max: null },
+  total: [],
+};
+const DEFAULT_STOCK_DISPLAY = {
+  showAvailability: true,
+  hidePreOrder: false,
+  showUnitsOfStock: false,
+  max: 9999,
+  low: 20,
+  last: 5,
+};
+const DEFAULT_ADDRESS_MANAGEMENT = {
+  allowAddressEditing: true,
+  allowBillingAddress: true,
+};
+const DEFAULT_CREDIT_SETTINGS = {
+  preventOrderIfExceeded: false,
+};
+const DEFAULT_CHECKOUT_ACCESS = {
+  disableCheckout: false,
 };
 
 async function ensureBaseGroup(shop) {
@@ -14,10 +37,16 @@ async function ensureBaseGroup(shop) {
   if (!base) {
     base = await CustomerGroup.create({
       name: "Base customer group",
+      handle: "base",
       isBase: true,
       shopifyTag: undefined,
+      priceLists: [],
       paymentMethods: DEFAULT_PAYMENT_METHODS,
       orderLimits: DEFAULT_ORDER_LIMITS,
+      stockDisplay: DEFAULT_STOCK_DISPLAY,
+      addressManagement: DEFAULT_ADDRESS_MANAGEMENT,
+      creditSettings: DEFAULT_CREDIT_SETTINGS,
+      checkoutAccess: DEFAULT_CHECKOUT_ACCESS,
       shop,
     });
   }
@@ -40,7 +69,10 @@ async function applyAllGroupsToCustomers(shop) {
   for (const customer of customers) {
     const matchedGroup = groups.find((g) => customer.tags.includes(g.shopifyTag));
     const targetGroup = matchedGroup || base;
-    const targetPriceList = targetGroup.priceList || base.priceList || null;
+    // Only the first list in the array is synced to Shopify today — full
+    // per-product layering across multiple price lists happens at checkout,
+    // not in this single priceList-per-customer sync.
+    const targetPriceList = targetGroup.priceLists?.[0] || base.priceLists?.[0] || null;
     const groupId = matchedGroup ? matchedGroup._id : null;
 
     const changed =

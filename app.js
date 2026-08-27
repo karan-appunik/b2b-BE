@@ -7,6 +7,8 @@ const productRoutes = require("./src/routes/product.routes");
 const customerRoutes = require("./src/routes/customer.routes");
 const customerGroupRoutes = require("./src/routes/customerGroup.routes");
 const priceListRoutes = require("./src/routes/priceList.routes");
+const orderRoutes = require("./src/routes/order.routes");
+const dashboardRoutes = require("./src/routes/dashboard.routes");
 const internalRoutes = require("./src/routes/internal.routes");
 const { notFound, errorHandler } = require("./src/middleware/error.middleware");
 
@@ -29,6 +31,8 @@ app.use("/api/products", productRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/customer-groups", customerGroupRoutes);
 app.use("/api/price-lists", priceListRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/internal", internalRoutes);
 
 app.use(notFound);

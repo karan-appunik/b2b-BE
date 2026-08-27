@@ -35,6 +35,10 @@ const customerSchema = new mongoose.Schema(
     },
     priceList: { type: mongoose.Schema.Types.ObjectId, ref: "PriceList", default: null },
     customerGroup: { type: mongoose.Schema.Types.ObjectId, ref: "CustomerGroup", default: null },
+    // Mirrors SparkLayer's `sparklayer.payment_on_account` customer metafield
+    // ({ credit_limit, balance }) — null limit means "no credit limit set".
+    creditLimit: { type: Number, default: null, min: 0 },
+    creditBalance: { type: Number, default: 0, min: 0 },
     shopifyCustomerId: { type: String, trim: true },
     shopifyCompanyId: { type: String, trim: true },
     shopifyCompanyLocationId: { type: String, trim: true },

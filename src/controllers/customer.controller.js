@@ -1,5 +1,11 @@
 const Customer = require("../models/customer.model");
-const { applyAllGroupsToCustomers } = require("../services/customerGroup.service");
+const CustomerGroup = require("../models/customerGroup.model");
+const { applyAllGroupsToCustomers, ensureBaseGroup } = require("../services/customerGroup.service");
+
+const DEFAULT_ORDER_LIMITS = {
+  quantity: { min: null, max: null },
+  total: [],
+};
 
 async function getCustomers(req, res, next) {
   try {
@@ -41,10 +47,13 @@ async function createCustomer(req, res, next) {
 
 async function updateCustomer(req, res, next) {
   try {
-    const { name, email, company, role } = req.body;
+    const { name, email, company, role, creditLimit, creditBalance } = req.body;
+    const update = { name, email, company, role };
+    if (creditLimit !== undefined) update.creditLimit = creditLimit === "" ? null : creditLimit;
+    if (creditBalance !== undefined) update.creditBalance = creditBalance;
     const customer = await Customer.findOneAndUpdate(
       { _id: req.params.id, shop: req.user.shop },
-      { name, email, company, role },
+      update,
       { new: true, runValidators: true }
     ).populate("priceList", "name");
 
@@ -143,6 +152,11 @@ async function bulkImportCustomers(req, res, next) {
         if (c.shopifyCompanyLocationId)
           setFields.shopifyCompanyLocationId = String(c.shopifyCompanyLocationId);
         if (c.shopifyCompanyName) setFields.shopifyCompanyName = String(c.shopifyCompanyName);
+        // Mirrors the shop's real Shopify "payment_on_account" customer
+        // metafield — admin-frontend reads it fresh on every sync so this
+        // stays a read-only reflection of Shopify, not an independent value.
+        if (c.creditLimit !== undefined) setFields.creditLimit = c.creditLimit;
+        if (c.creditBalance !== undefined) setFields.creditBalance = c.creditBalance;
 
         return {
           updateOne: {
@@ -174,6 +188,181 @@ async function bulkImportCustomers(req, res, next) {
       updated: result.modifiedCount,
       groupSync,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Looks up a single customer by their Shopify customer id, for the storefront
+// to determine whether the person currently logged in is a sales agent (and
+// if so, which role) — called via admin-frontend's app proxy using
+// Shopify's `logged_in_customer_id`, not a merchant session.
+async function getAgentContext(req, res, next) {
+  try {
+    const { shop, shopifyCustomerId } = req.query;
+
+    if (!shop || !shopifyCustomerId) {
+      return res.status(400).json({ message: "shop and shopifyCustomerId are required" });
+    }
+
+    const customer = await Customer.findOne({
+      shop,
+      shopifyCustomerId: String(shopifyCustomerId),
+    });
+
+    if (!customer || !["sales_agent", "sales_admin"].includes(customer.role)) {
+      return res.status(200).json({ isAgent: false });
+    }
+
+    res.status(200).json({
+      isAgent: true,
+      role: customer.role,
+      name: customer.name,
+      email: customer.email,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Lets a sales agent search for the B2B customer they want to place an
+// order on behalf of. Matches by name, email, or company — the fields
+// SparkLayer's own agent search supports that we actually store.
+async function searchB2bCustomers(req, res, next) {
+  try {
+    const { shop, q } = req.query;
+
+    if (!shop) {
+      return res.status(400).json({ message: "shop is required" });
+    }
+
+    const query = String(q || "").trim();
+    if (!query) {
+      return res.status(200).json([]);
+    }
+
+    const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+
+    const customers = await Customer.find({
+      shop,
+      shopifyCustomerId: { $exists: true, $ne: null },
+      $or: [{ name: pattern }, { email: pattern }, { company: pattern }],
+    })
+      .select("name email company shopifyCustomerId")
+      .limit(20);
+
+    res.status(200).json(
+      customers.map((c) => ({
+        id: c._id,
+        name: c.name,
+        email: c.email,
+        company: c.company || null,
+        shopifyCustomerId: c.shopifyCustomerId,
+      }))
+    );
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Called from admin-frontend's checkout proxy (apps.sparklayer.checkout.tsx)
+// to enforce a customer group's order quantity/total limits at checkout — the
+// same effective-limits resolution getCustomerGroup uses in the merchant
+// panel, just keyed off the shopper's Shopify customer id instead of a
+// merchant session.
+async function getOrderLimits(req, res, next) {
+  try {
+    const { shop, shopifyCustomerId } = req.query;
+
+    if (!shop || !shopifyCustomerId) {
+      return res.status(200).json(DEFAULT_ORDER_LIMITS);
+    }
+
+    const customer = await Customer.findOne({ shop, shopifyCustomerId: String(shopifyCustomerId) });
+    if (!customer) {
+      return res.status(200).json(DEFAULT_ORDER_LIMITS);
+    }
+
+    const base = await ensureBaseGroup(shop);
+    const group = customer.customerGroup
+      ? await CustomerGroup.findOne({ _id: customer.customerGroup, shop })
+      : null;
+    const effectiveGroup = group || base;
+
+    res.status(200).json(effectiveGroup.orderLimits || base.orderLimits || DEFAULT_ORDER_LIMITS);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Called from the checkout proxy before creating a "pay on account" draft
+// order — mirrors SparkLayer's sparklayer.payment_on_account customer
+// metafield ({ credit_limit, balance }). creditLimit null means no limit set.
+async function getCreditInfo(req, res, next) {
+  try {
+    const { shop, shopifyCustomerId } = req.query;
+
+    if (!shop || !shopifyCustomerId) {
+      return res.status(200).json({ creditLimit: null, balance: 0, enforced: false });
+    }
+
+    const customer = await Customer.findOne({ shop, shopifyCustomerId: String(shopifyCustomerId) });
+    if (!customer) {
+      return res.status(200).json({ creditLimit: null, balance: 0, enforced: false });
+    }
+
+    // The customer group's "Prevent placing an order if exceeding credit
+    // limit" checkbox (Customer Groups > [group] > Credit settings) is the
+    // on/off switch — a numeric limit on the customer record alone doesn't
+    // enforce anything unless their effective group has this turned on.
+    const base = await ensureBaseGroup(shop);
+    const group = customer.customerGroup
+      ? await CustomerGroup.findOne({ _id: customer.customerGroup, shop })
+      : null;
+    const effectiveGroup = group || base;
+    const creditSettings = effectiveGroup.creditSettings || base.creditSettings;
+    const enforced = !!creditSettings?.preventOrderIfExceeded;
+
+    // "Payment on account" (Customer Groups > [group] > Payment methods) is
+    // its own payment method, separate from Shopify's native Net Terms —
+    // gates whether the storefront's "Payment on Account" option (and thus
+    // credit-limit spend) is available to this shopper at all.
+    const paymentMethods = effectiveGroup.paymentMethods || base.paymentMethods;
+    const onAccountEnabled = !!paymentMethods?.onAccount;
+
+    res.status(200).json({
+      creditLimit: customer.creditLimit,
+      balance: customer.creditBalance || 0,
+      enforced,
+      onAccountEnabled,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Called after a "pay on account" order is successfully placed — the
+// customer's outstanding balance grows by the order total, same as
+// SparkLayer's own balance auto-update after a successful order.
+async function chargeCredit(req, res, next) {
+  try {
+    const { shop, shopifyCustomerId, amount } = req.body;
+
+    if (!shop || !shopifyCustomerId || !(Number(amount) > 0)) {
+      return res.status(400).json({ message: "shop, shopifyCustomerId and a positive amount are required" });
+    }
+
+    const customer = await Customer.findOneAndUpdate(
+      { shop, shopifyCustomerId: String(shopifyCustomerId) },
+      { $inc: { creditBalance: Number(amount) } },
+      { new: true }
+    );
+
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    res.status(200).json({ balance: customer.creditBalance });
   } catch (err) {
     next(err);
   }
@@ -221,6 +410,11 @@ module.exports = {
   updateCustomer,
   deleteCustomer,
   addCustomerAddress,
+  getAgentContext,
+  searchB2bCustomers,
+  getOrderLimits,
+  getCreditInfo,
+  chargeCredit,
   bulkImportCustomers,
   deleteCustomersByShopifyCustomer,
   cleanupRemovedCustomers,
