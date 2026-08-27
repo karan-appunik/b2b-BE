@@ -168,6 +168,53 @@ async function upsertItems(req, res, next) {
   }
 }
 
+async function upsertItemForProduct(req, res, next) {
+  try {
+    const { price, minQuantity, unitOfMeasure, tiers } = req.body;
+
+    if (price === undefined || Number.isNaN(Number(price))) {
+      return res.status(400).json({ message: "price is required" });
+    }
+
+    const priceList = await priceListService.upsertItemForProduct(
+      req.params.id,
+      req.params.productId,
+      { price: Number(price), minQuantity: Number(minQuantity) || 1, unitOfMeasure, tiers },
+      req.user.shop
+    );
+
+    if (!priceList) {
+      return res.status(404).json({ message: "Price list not found" });
+    }
+
+    const shopifySync = await autoSyncToShopify(priceList);
+
+    res.status(200).json({ ...priceList.toObject(), shopifySync });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function removeItemForProduct(req, res, next) {
+  try {
+    const priceList = await priceListService.removeItemForProduct(
+      req.params.id,
+      req.params.productId,
+      req.user.shop
+    );
+
+    if (!priceList) {
+      return res.status(404).json({ message: "Price list not found" });
+    }
+
+    const shopifySync = await autoSyncToShopify(priceList);
+
+    res.status(200).json({ ...priceList.toObject(), shopifySync });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function performShopifyPush(priceListId, shop) {
   const priceList = await PriceList.findOne({ _id: priceListId, shop }).populate(
     "items.product",
@@ -199,6 +246,13 @@ async function performShopifyPush(priceListId, shop) {
   const prices = pricedItems.map((item) => ({
     variantId: item.product.shopifyVariantId,
     amount: String(item.price),
+    // Full quantity-break schedule for this variant on this price list —
+    // admin-frontend stores this on the wholesale_price metafield so
+    // checkout/storefront can pick the right tier for the ordered quantity.
+    tiers: [
+      { minQuantity: item.minQuantity || 1, price: item.price },
+      ...(item.tiers || []).map((t) => ({ minQuantity: t.minQuantity, price: t.price })),
+    ].sort((a, b) => a.minQuantity - b.minQuantity),
   }));
 
   const currentVariantIds = prices.map((p) => p.variantId);
@@ -434,6 +488,8 @@ module.exports = {
   updatePriceList,
   deletePriceList,
   upsertItems,
+  upsertItemForProduct,
+  removeItemForProduct,
   assignCustomers,
   pushToShopify,
   autoSyncToShopify,

@@ -7,6 +7,8 @@ const {
   updatePriceList,
   deletePriceList,
   upsertItems,
+  upsertItemForProduct,
+  removeItemForProduct,
   assignCustomers,
   pushToShopify,
   bulkImportPriceLists,
@@ -21,6 +23,8 @@ router.route("/").get(getPriceLists).post(createPriceList);
 router.post("/bulk", bulkImportPriceLists);
 router.route("/:id").get(getPriceList).put(updatePriceList).delete(deletePriceList);
 router.put("/:id/items", upsertItems);
+router.put("/:id/items/:productId", upsertItemForProduct);
+router.delete("/:id/items/:productId", removeItemForProduct);
 router.put("/:id/customers", assignCustomers);
 router.post("/:id/push-to-shopify", pushToShopify);
 

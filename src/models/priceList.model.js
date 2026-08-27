@@ -1,9 +1,24 @@
 const mongoose = require("mongoose");
 
+const priceTierSchema = new mongoose.Schema(
+  {
+    minQuantity: { type: Number, required: true, min: 1 },
+    unitOfMeasure: { type: String, trim: true, default: "" },
+    price: { type: Number, required: true, min: 0 },
+  },
+  { timestamps: false }
+);
+
 const priceListItemSchema = new mongoose.Schema(
   {
     product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    // Base price row — its quantity/unit/price are all editable, but (per
+    // SparkLayer's Price Editor) this entry can never be removed, unlike
+    // the extra quantity-break rows in `tiers`.
     price: { type: Number, required: true, min: 0 },
+    minQuantity: { type: Number, default: 1, min: 1 },
+    unitOfMeasure: { type: String, trim: true, default: "" },
+    tiers: { type: [priceTierSchema], default: [] },
   },
   { _id: false }
 );
