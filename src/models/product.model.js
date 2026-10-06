@@ -25,7 +25,10 @@ const productSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-productSchema.index({ shop: 1, sku: 1 }, { unique: true });
+// Not unique: Shopify assigns the same placeholder SKU (e.g. "sku-untracked-1")
+// to multiple untracked-inventory variants — shopifyVariantId below is the
+// real identity key for upserts/dedup.
+productSchema.index({ shop: 1, sku: 1 });
 productSchema.index(
   { shop: 1, shopifyVariantId: 1 },
   { unique: true, partialFilterExpression: { shopifyVariantId: { $exists: true } } }

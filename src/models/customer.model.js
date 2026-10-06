@@ -49,7 +49,10 @@ const customerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-customerSchema.index({ shop: 1, email: 1 }, { unique: true });
+// Not unique: Shopify itself doesn't guarantee one email per customer record
+// — a company contact can be a separate Customer sharing its parent's email.
+// shopifyCustomerId below is the real identity key for upserts/dedup.
+customerSchema.index({ shop: 1, email: 1 });
 customerSchema.index(
   { shop: 1, shopifyCustomerId: 1 },
   { unique: true, partialFilterExpression: { shopifyCustomerId: { $exists: true } } }

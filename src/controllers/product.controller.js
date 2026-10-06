@@ -230,6 +230,7 @@ async function getProductPricing(req, res, next) {
         id: v._id,
         sku: v.sku,
         variantTitle: v.variantTitle || null,
+        shopifyVariantId: v.shopifyVariantId || null,
       })),
       priceLists,
       availablePriceLists,

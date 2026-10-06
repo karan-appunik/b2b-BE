@@ -274,58 +274,60 @@ async function performShopifyPush(priceListId, shop) {
     return { ok: false, statusCode: 500, message: "ADMIN_FRONTEND_URL is not configured" };
   }
 
-  const pushRes = await fetch(`${adminFrontendUrl}/internal/price-lists/push`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-internal-api-key": process.env.INTERNAL_API_KEY,
-    },
-    body: JSON.stringify({
-      shop: priceList.shop,
-      priceListName: priceList.name,
-      currency: priceList.currency,
-      tag: B2B_BASE_TAG,
-      prices,
-      previousVariantIds: priceList.shopifyPushedVariantIds || [],
-      addCustomerIds,
-      removeCustomerIds,
-    }),
-  });
+  try {
+    const pushRes = await fetch(`${adminFrontendUrl}/internal/price-lists/push`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-api-key": process.env.INTERNAL_API_KEY,
+      },
+      body: JSON.stringify({
+        shop: priceList.shop,
+        priceListName: priceList.name,
+        currency: priceList.currency,
+        tag: B2B_BASE_TAG,
+        prices,
+        previousVariantIds: priceList.shopifyPushedVariantIds || [],
+        addCustomerIds,
+        removeCustomerIds,
+      }),
+    });
 
-  const result = await pushRes.json();
+    const result = await pushRes.json().catch(() => ({}));
 
-  if (!pushRes.ok || result.error) {
-    priceList.shopifyPushError = result.error || result.message || "Push to Shopify failed";
-    await priceList.save();
-    return { ok: false, statusCode: 400, message: priceList.shopifyPushError };
-  }
+    if (!pushRes.ok || result.error) {
+      priceList.shopifyPushError = result.error || result.message || "Push to Shopify failed";
+      await priceList.save();
+      return { ok: false, statusCode: 400, message: priceList.shopifyPushError };
+    }
 
-  // Customers whose tag add/remove call failed on Shopify's side aren't
-  // actually tagged yet — excluding them here (instead of trusting
-  // currentCustomerIds blindly) means the next push retries them, rather
-  // than silently treating a failed tag write as done forever.
-  const failedTagCustomerIds = new Set(result.failedTagCustomerIds || []);
-  if (failedTagCustomerIds.size > 0) {
-    console.error(
-      `[priceList] tag sync failed for ${failedTagCustomerIds.size} customer(s) on "${priceList.name}" — will retry on next push`,
-      [...failedTagCustomerIds],
+    // Customers whose tag add/remove call failed on Shopify's side aren't
+    // actually tagged yet — excluding them here (instead of trusting
+    // currentCustomerIds blindly) means the next push retries them, rather
+    // than silently treating a failed tag write as done forever.
+    const failedTagCustomerIds = new Set(result.failedTagCustomerIds || []);
+    if (failedTagCustomerIds.size > 0) {
+      console.error(
+        `[priceList] tag sync failed for ${failedTagCustomerIds.size} customer(s) on "${priceList.name}" — will retry on next push`,
+        [...failedTagCustomerIds],
+      );
+    }
+
+    priceList.shopifyPushedVariantIds = currentVariantIds;
+    priceList.shopifyPushedCustomerIds = currentCustomerIds.filter(
+      (id) => !failedTagCustomerIds.has(id),
     );
+    priceList.shopifyPushedAt = new Date();
+    priceList.shopifyPushError = undefined;
+    await priceList.save();
+
+    return { ok: true, priceList };
+  } catch (err) {
+    console.error("[performShopifyPush] push error:", err.message);
+    priceList.shopifyPushError = err.message;
+    await priceList.save().catch(() => {});
+    return { ok: false, statusCode: 500, message: err.message };
   }
-
-  priceList.shopifyPushedVariantIds = currentVariantIds;
-  priceList.shopifyPushedCustomerIds = currentCustomerIds.filter(
-    (id) => !failedTagCustomerIds.has(id),
-  );
-  // shopifySegmentId / shopifyItemDiscounts are no longer written — wholesale
-  // pricing is enforced at checkout time from the wholesale_price metafield
-  // (see apps.sparklayer.checkout.tsx) rather than a Shopify Segment +
-  // Automatic Discount. The schema fields are left in place as harmless
-  // legacy columns for price lists pushed before this change.
-  priceList.shopifyPushedAt = new Date();
-  priceList.shopifyPushError = undefined;
-  await priceList.save();
-
-  return { ok: true, priceList };
 }
 
 async function autoSyncToShopify(priceList) {
@@ -333,13 +335,18 @@ async function autoSyncToShopify(priceList) {
     return { attempted: false };
   }
 
-  const result = await performShopifyPush(priceList._id, priceList.shop);
+  try {
+    const result = await performShopifyPush(priceList._id, priceList.shop);
 
-  if (!result.ok && result.statusCode === 400 && /linked to Shopify/.test(result.message)) {
-    return { attempted: false };
+    if (!result.ok && result.statusCode === 400 && /linked to Shopify/.test(result.message)) {
+      return { attempted: false };
+    }
+
+    return { attempted: true, ok: result.ok, message: result.ok ? undefined : result.message };
+  } catch (err) {
+    console.warn("[autoSyncToShopify] error:", err.message);
+    return { attempted: false, error: err.message };
   }
-
-  return { attempted: true, ok: result.ok, message: result.ok ? undefined : result.message };
 }
 
 async function bulkImportPriceLists(req, res, next) {
