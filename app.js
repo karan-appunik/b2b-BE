@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 const healthRoutes = require("./src/routes/health.routes");
 const authRoutes = require("./src/routes/auth.routes");
@@ -10,6 +11,7 @@ const priceListRoutes = require("./src/routes/priceList.routes");
 const discountRoutes = require("./src/routes/discount.routes");
 const orderRoutes = require("./src/routes/order.routes");
 const dashboardRoutes = require("./src/routes/dashboard.routes");
+const formRoutes = require("./src/routes/form.routes");
 const internalRoutes = require("./src/routes/internal.routes");
 const { notFound, errorHandler } = require("./src/middleware/error.middleware");
 
@@ -17,6 +19,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -35,6 +38,7 @@ app.use("/api/price-lists", priceListRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/forms", formRoutes);
 app.use("/api/internal", internalRoutes);
 
 app.use(notFound);
