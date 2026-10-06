@@ -16,6 +16,7 @@ const {
   getCreditInfo,
   chargeCredit,
 } = require("../controllers/customer.controller");
+const { getActiveDiscounts, recordDiscountRedemptions } = require("../controllers/discount.controller");
 const { protectInternal } = require("../middleware/internal.middleware");
 
 const router = express.Router();
@@ -34,6 +35,9 @@ router.get("/customers/search", searchB2bCustomers);
 router.get("/customers/order-limits", getOrderLimits);
 router.get("/customers/credit", getCreditInfo);
 router.post("/customers/credit/charge", chargeCredit);
+
+router.get("/discounts/active", getActiveDiscounts);
+router.post("/discounts/redemptions", recordDiscountRedemptions);
 
 router.post("/orders/sync", bulkImportOrders);
 
