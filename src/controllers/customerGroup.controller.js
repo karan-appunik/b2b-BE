@@ -138,7 +138,7 @@ async function createCustomerGroup(req, res, next) {
       shopifyTag,
       priceLists: priceLists || [],
       paymentMethods: paymentMethods || null,
-      orderLimits: orderLimits || null,
+      orderLimits: cleanOrderLimits(orderLimits) || null,
       stockDisplay: stockDisplay || null,
       addressManagement: addressManagement || null,
       creditSettings: creditSettings || null,
@@ -152,6 +152,12 @@ async function createCustomerGroup(req, res, next) {
   } catch (err) {
     next(err);
   }
+}
+
+// A pack size of 0 or blank means no pack size.
+function cleanOrderLimits(limits) {
+  if (limits && limits.quantity && !limits.quantity.increment) limits.quantity.increment = null;
+  return limits;
 }
 
 async function updateCustomerGroup(req, res, next) {
@@ -179,7 +185,7 @@ async function updateCustomerGroup(req, res, next) {
       name,
       priceLists: priceLists || [],
       paymentMethods: paymentMethods || null,
-      orderLimits: orderLimits || null,
+      orderLimits: cleanOrderLimits(orderLimits) || null,
       stockDisplay: stockDisplay || null,
       addressManagement: addressManagement || null,
       creditSettings: creditSettings || null,

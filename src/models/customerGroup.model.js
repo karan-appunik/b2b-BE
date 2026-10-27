@@ -25,6 +25,8 @@ const orderLimitsSchema = new mongoose.Schema(
     quantity: {
       min: { type: Number, default: null, min: 0 },
       max: { type: Number, default: null, min: 0 },
+      // The pack size: the order must be a multiple of this (spec §4.5).
+      increment: { type: Number, default: null, min: 1 },
     },
     // One row per currency — a store selling in multiple currencies needs a
     // separate min/max per currency rather than one amount that's wrong for
