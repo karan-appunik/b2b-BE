@@ -4,6 +4,7 @@ const OverrideRequest = require("../models/overrideRequest.model");
 const ApprovalPolicy = require("../models/approvalPolicy.model");
 const AgentSettings = require("../models/agentSettings.model");
 const Role = require("../models/role.model");
+const Customer = require("../models/customer.model");
 const overrides = require("../services/override.service");
 const { AUDIT_ACTIONS, recordAudit } = require("../services/audit.service");
 
@@ -352,6 +353,16 @@ async function updateSettings(req, res, next) {
       update.provisionalOrdering = req.body.provisionalOrdering;
     }
     if (req.body.requireTaxId !== undefined) update.requireTaxId = req.body.requireTaxId === true;
+    if (req.body.hiddenRoles !== undefined) {
+      const keys = Array.isArray(req.body.hiddenRoles) ? [...new Set(req.body.hiddenRoles.map(String))] : null;
+      if (!keys) return res.status(400).json({ message: "hiddenRoles must be a list of role keys" });
+      const known = new Set((await Role.find({ shop: req.user.shop }).select("key")).map((r) => r.key));
+      if (keys.some((k) => !known.has(k))) return res.status(400).json({ message: "hiddenRoles has a role that does not exist" });
+      // Someone already holding a hidden role would lose it from every picker.
+      const inUse = await Customer.find({ shop: req.user.shop, role: { $in: keys } }).distinct("role");
+      if (inUse.length) return res.status(400).json({ message: "Can't hide a role that people still hold: " + inUse.join(", ") });
+      update.hiddenRoles = keys;
+    }
     if (req.body.requestTtlHours !== undefined) {
       const v = Number(req.body.requestTtlHours);
       if (!(v >= 1 && v <= 24 * 30)) return res.status(400).json({ message: "requestTtlHours must be between 1 and 720" });

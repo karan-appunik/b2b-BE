@@ -5,6 +5,7 @@ const { getSettings } = require("./override.service");
 const { AUDIT_ACTIONS, recordAudit } = require("./audit.service");
 const { EVENT_TYPES, emitEvent } = require("./outbox.service");
 const { maskEmail } = require("./paymentLink.service");
+const { getAdminFrontendUrl } = require("../config/adminFrontend");
 
 // Creating a customer at a trade event (spec §3.4). A privileged agent makes a
 // provisional account: duplicates are checked, the business fields and consent
@@ -255,6 +256,31 @@ async function listProvisional(shop) {
   }));
 }
 
+// The provisional tag is what keeps the account in the safe default group, so
+// approving means taking it off in Shopify too. Best effort: the approval itself
+// is already saved, and the result tells the panel if the tag is still there.
+async function removeProvisionalTags({ shop, customer, tags }) {
+  const adminFrontendUrl = getAdminFrontendUrl();
+  if (!adminFrontendUrl || !customer.shopifyCustomerId || !tags.length) return false;
+
+  try {
+    const res = await fetch(`${adminFrontendUrl}/internal/customers/remove-tags`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-internal-api-key": process.env.INTERNAL_API_KEY },
+      body: JSON.stringify({ shop, shopifyCustomerId: customer.shopifyCustomerId, tags }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.error) {
+      console.error("[customerCreate] could not remove provisional tag in Shopify", customer.shopifyCustomerId, body.error || res.status);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[customerCreate] could not reach admin-frontend to remove provisional tag", err.message);
+    return false;
+  }
+}
+
 async function approveProvisional({ shop, customerId, user }) {
   const customer = await Customer.findOneAndUpdate(
     { _id: customerId, shop, provisional: true },
@@ -262,6 +288,12 @@ async function approveProvisional({ shop, customerId, user }) {
     { new: true }
   );
   if (!customer) throw new CustomerCreateError("NOT_FOUND", "No provisional customer found", 404);
+
+  const settings = await getSettings(shop);
+  const tagRemoved = await removeProvisionalTags({ shop, customer, tags: settings.newCustomerTags });
+  if (tagRemoved) {
+    await Customer.updateOne({ _id: customer._id }, { $pull: { tags: { $in: settings.newCustomerTags } } });
+  }
 
   await recordAudit({
     shop,
@@ -271,9 +303,10 @@ async function approveProvisional({ shop, customerId, user }) {
     action: AUDIT_ACTIONS.CUSTOMER_APPROVED,
     objectType: "customer",
     objectId: String(customer._id),
+    metadata: { tagRemoved },
   });
 
-  return customer;
+  return { customer, tagRemoved };
 }
 
 // An address added to a customer on their behalf is recorded: who, for whom,
