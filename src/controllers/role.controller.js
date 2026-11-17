@@ -3,6 +3,7 @@ const Customer = require("../models/customer.model");
 const { PERMISSION_CATALOG, PERMISSION_KEYS, SYSTEM_ROLES, CUSTOMER_ROLE } = require("../config/permissions");
 const { ensureSystemRoles, loadAncestors } = require("../services/role.service");
 const { AUDIT_ACTIONS, recordAudit } = require("../services/audit.service");
+const { getSettings } = require("../services/override.service");
 
 const PERCENT_FIELDS = ["maxDeltaPercent", "maxPercent"];
 
@@ -102,19 +103,24 @@ function roleAudit(req, role, action, extra = {}) {
 }
 
 // GET /api/roles — every role with how many people hold it, plus the
-// permission catalog the role editor draws its checkboxes from.
+// permission catalog the role editor draws its checkboxes from. Roles the
+// merchant has hidden are left out unless ?all=true (the settings page).
 async function listRoles(req, res, next) {
   try {
     const shop = req.user.shop;
     await ensureSystemRoles(shop);
 
-    const [roles, counts] = await Promise.all([
+    const [roles, counts, settings] = await Promise.all([
       Role.find({ shop, status: "active" }).sort({ isSystem: -1, name: 1 }),
       Customer.aggregate([
         { $match: { shop } },
         { $group: { _id: "$role", count: { $sum: 1 } } },
       ]),
+      getSettings(shop),
     ]);
+
+    const hidden = new Set(settings.hiddenRoles);
+    const visible = req.query.all === "true" ? roles : roles.filter((r) => !hidden.has(r.key));
 
     const countByRole = new Map(counts.map((c) => [c._id, c.count]));
 
@@ -122,11 +128,11 @@ async function listRoles(req, res, next) {
     // then custom roles by name.
     const builtInOrder = SYSTEM_ROLES.map((r) => r.key);
     const rank = (r) => (builtInOrder.includes(r.key) ? builtInOrder.indexOf(r.key) : builtInOrder.length);
-    roles.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    visible.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
 
     res.status(200).json({
       catalog: PERMISSION_CATALOG,
-      roles: roles.map((r) => ({ ...r.toObject(), memberCount: countByRole.get(r.key) || 0 })),
+      roles: visible.map((r) => ({ ...r.toObject(), memberCount: countByRole.get(r.key) || 0, hidden: hidden.has(r.key) })),
     });
   } catch (err) {
     next(err);

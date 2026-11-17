@@ -32,6 +32,9 @@ const agentSettingsSchema = new mongoose.Schema(
     // until the merchant approves the account.
     provisionalOrdering: { type: String, enum: ["allow", "block"], default: "allow" },
     requireTaxId: { type: Boolean, default: false },
+    // Roles kept out of the Roles page and every role picker. Sales manager
+    // starts hidden on a fresh install; the merchant can show it from settings.
+    hiddenRoles: { type: [String], default: ["sales_manager"] },
     // Alerts (spec §10.2). Reminders go out this many days before a sent
     // quote expires; an approval past its SLA is escalated; each agent gets one
     // daily summary. Emails wait out quiet hours (the shop's own time zone).

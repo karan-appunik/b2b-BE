@@ -81,8 +81,8 @@ const list = guard(async (req, res) => {
 const approve = guard(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ code: "NOT_FOUND", message: "No provisional customer found" });
 
-  await svc.approveProvisional({ shop: req.user.shop, customerId: req.params.id, user: req.user });
-  res.status(200).json({ ok: true });
+  const { tagRemoved } = await svc.approveProvisional({ shop: req.user.shop, customerId: req.params.id, user: req.user });
+  res.status(200).json({ ok: true, tagRemoved });
 });
 
 module.exports = { recordAddress, check, record, list, approve };
