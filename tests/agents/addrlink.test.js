@@ -1,0 +1,61 @@
+const ROOT = require("path").join(__dirname, "..", "..");
+process.chdir(ROOT);
+process.env.AGENT_MFA_DEFAULT = "false";
+process.env.INTERNAL_API_KEY = "k";
+process.env.JWT_SECRET = "s";
+const R = (m) => require(require("path").join(ROOT, m));
+const mongoose = R("node_modules/mongoose");
+const app = R("app");
+const Customer = R("src/models/customer.model");
+const PaymentLink = R("src/models/paymentLink.model");
+const Notification = R("src/models/notification.model");
+const Audit = R("src/models/auditEvent.model");
+let pass = 0, fail = 0;
+const ok = (n, c, extra) => { c ? pass++ : fail++; console.log((c ? "PASS " : "FAIL ") + n + (c ? "" : "  " + JSON.stringify(extra))); };
+(async () => {
+  await mongoose.connect("mongodb://localhost:27017/sparklayer_test_addrlink");
+  await mongoose.connection.dropDatabase();
+  const srv = app.listen(0);
+  const base = "http://localhost:" + srv.address().port;
+  const shop = "t.myshopify.com";
+  const IH = { "x-internal-api-key": "k", "Content-Type": "application/json" };
+  const sync = async (rows) => { const r = await fetch(base + "/api/internal/customers/sync", { method: "POST", headers: IH, body: JSON.stringify({ shop, customers: rows }) }); return { s: r.status, j: await r.json().catch(() => null) }; };
+  const gid = (n) => "gid://shopify/Customer/" + n;
+  const agent = await Customer.create({ name: "agent", email: "a@x.com", shop, shopifyCustomerId: gid("agent"), role: "sales_agent" });
+  const buyer = await Customer.create({ name: "buyer", email: "b@x.com", shop, shopifyCustomerId: gid("buyer"), region: { countryCode: "US", provinceCode: "TX", zip: "78701" } });
+  const other = await Customer.create({ name: "other", email: "o@x.com", shop, shopifyCustomerId: gid("other"), region: { countryCode: "US", provinceCode: "TX", zip: "78701" } });
+  const mkLink = (customer, shipTo, n) => PaymentLink.create({ shop, token: "t" + n, customer: customer._id, agent: agent._id, draftOrderId: "d" + n, invoiceUrl: "https://x/" + n, amount: 5000, currency: "USD", expiresAt: new Date(Date.now() + 3600e3), shipTo });
+  const l1 = await mkLink(buyer, { zip: "78701", countryCode: "us", provinceCode: "tx" }, 1);
+  const l2 = await mkLink(buyer, { zip: "10001", countryCode: "US", provinceCode: "NY" }, 2);
+  const l3 = await mkLink(buyer, undefined, 3);
+  const l4 = await mkLink(other, { zip: "78701", countryCode: "US", provinceCode: "TX" }, 4);
+  const row = (c, region) => ({ name: c.name, email: c.email, shopifyCustomerId: c.shopifyCustomerId, region });
+  const status = async (l) => (await PaymentLink.findById(l._id)).status;
+
+  let r = await sync([row(buyer, { countryCode: "US", provinceCode: "TX", zip: "78701" })]);
+  ok("a sync with the same address changes nothing", r.s === 200 && (await status(l1)) === "ACTIVE");
+
+  r = await sync([row(buyer, { countryCode: "US", provinceCode: "TX", zip: "78702" })]);
+  ok("the address changed: the link that shipped to the old one is withdrawn", (await status(l1)) === "REVOKED", r.j);
+  ok("a link to a different address is left", (await status(l2)) === "ACTIVE");
+  ok("a link with no address recorded is left", (await status(l3)) === "ACTIVE");
+  ok("another customer's link is left", (await status(l4)) === "ACTIVE");
+  const revoked = await PaymentLink.findById(l1._id);
+  ok("the reason is on the link's timeline", revoked.activity.some((a) => a.type === "revoked" && a.comment === "ADDRESS_CHANGED"), revoked.activity);
+  ok("the audit trail says why", !!(await Audit.findOne({ shop, action: "payment_link.revoked", reasonCode: "ADDRESS_CHANGED" })));
+  const n = await Notification.findOne({ type: "payment_link.withdrawn" });
+  ok("the agent is told to send a new one", n && String(n.recipient) === String(agent._id) && /Send a new one/.test(n.body) && /50\.00/.test(n.body), n);
+
+  r = await sync([row(buyer, { countryCode: "US", provinceCode: "NY", zip: "10001" })]);
+  ok("moving TO the address a link ships to keeps that link", (await status(l2)) === "ACTIVE");
+  r = await sync([row(buyer, { countryCode: "US", provinceCode: "DC", zip: "20001" })]);
+  ok("moving away from it later withdraws that link", (await status(l2)) === "REVOKED");
+  r = await sync([{ name: "buyer", email: "b@x.com", shopifyCustomerId: gid("buyer") }]);
+  ok("a sync without an address does nothing", r.s === 200 && (await status(l3)) === "ACTIVE");
+  const cnt = await Notification.countDocuments({ type: "payment_link.withdrawn" });
+  ok("each withdrawn link is reported once", cnt === 2, cnt);
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  await mongoose.connection.dropDatabase();
+  process.exit(fail ? 1 : 0);
+})();

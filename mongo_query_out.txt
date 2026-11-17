@@ -1,0 +1,26 @@
+[
+  {
+    "_id": "6a8828b52d8e464bc9a996cf",
+    "shop": "b2b-payment-test.myshopify.com",
+    "shopifyVariantId": "gid://shopify/ProductVariant/48512469106900",
+    "__v": 0,
+    "createdAt": "2026-08-21T10:30:13.442Z",
+    "msrp": 129,
+    "name": "Crescent Moon & Star Pendant Necklace - Waterproof Stainless Steel / Gold plated",
+    "shopifyProductId": "gid://shopify/Product/9317513396436",
+    "sku": "N-71949-SG",
+    "updatedAt": "2026-08-25T06:36:24.473Z"
+  },
+  {
+    "_id": "6a883ab02d8e464bc9a996e5",
+    "shopifyVariantId": "gid://shopify/ProductVariant/48512469139668",
+    "shop": "b2b-payment-test.myshopify.com",
+    "__v": 0,
+    "createdAt": "2026-08-21T11:46:56.124Z",
+    "msrp": 129,
+    "name": "Crescent Moon & Star Pendant Necklace - Waterproof Stainless Steel / Silver plated",
+    "shopifyProductId": "gid://shopify/Product/9317513396436",
+    "sku": "N-71949-ST",
+    "updatedAt": "2026-08-25T06:36:24.473Z"
+  }
+]

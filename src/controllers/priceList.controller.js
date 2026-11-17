@@ -1,12 +1,20 @@
 const PriceList = require("../models/priceList.model");
+const Product = require("../models/product.model");
 const Customer = require("../models/customer.model");
 const priceListService = require("../services/priceList.service");
+const { getAdminFrontendUrl } = require("../config/adminFrontend");
+
+// SparkLayer-style tag model: every B2B customer gets this fixed base tag
+// (granting wholesale pricing at checkout) plus their CustomerGroup's own
+// shopifyTag — not a tag per price list. See customerGroup.model.js.
+const B2B_BASE_TAG = "b2b";
 
 async function getPriceLists(req, res, next) {
   try {
-    const priceLists = await PriceList.find().sort({ createdAt: -1 });
+    const shop = req.user.shop;
+    const priceLists = await PriceList.find({ shop }).sort({ createdAt: -1 });
     const customerCounts = await Customer.aggregate([
-      { $match: { priceList: { $ne: null } } },
+      { $match: { shop, priceList: { $ne: null } } },
       { $group: { _id: "$priceList", count: { $sum: 1 } } },
     ]);
     const countsById = Object.fromEntries(
@@ -34,7 +42,8 @@ async function getPriceLists(req, res, next) {
 
 async function getPriceList(req, res, next) {
   try {
-    const priceList = await PriceList.findById(req.params.id).populate(
+    const shop = req.user.shop;
+    const priceList = await PriceList.findOne({ _id: req.params.id, shop }).populate(
       "items.product",
       "name sku msrp"
     );
@@ -43,7 +52,7 @@ async function getPriceList(req, res, next) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    const customers = await Customer.find({ priceList: priceList._id });
+    const customers = await Customer.find({ shop, priceList: priceList._id });
 
     res.status(200).json({ ...priceList.toObject(), customers });
   } catch (err) {
@@ -72,6 +81,7 @@ async function createPriceList(req, res, next) {
       status,
       pricingType,
       automaticPricing,
+      shop: req.user.shop,
     });
 
     res.status(201).json(priceList);
@@ -82,10 +92,10 @@ async function createPriceList(req, res, next) {
 
 async function updatePriceList(req, res, next) {
   try {
-    const { name, description, status } = req.body;
-    const priceList = await PriceList.findByIdAndUpdate(
-      req.params.id,
-      { name, description, status },
+    const { name, description, status, pricingType, automaticPricing } = req.body;
+    const priceList = await PriceList.findOneAndUpdate(
+      { _id: req.params.id, shop: req.user.shop },
+      { name, description, status, pricingType, automaticPricing },
       { new: true, runValidators: true }
     );
 
@@ -101,13 +111,14 @@ async function updatePriceList(req, res, next) {
 
 async function deletePriceList(req, res, next) {
   try {
-    const priceList = await PriceList.findByIdAndDelete(req.params.id);
+    const shop = req.user.shop;
+    const priceList = await PriceList.findOneAndDelete({ _id: req.params.id, shop });
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    await priceListService.cascadeUnassignOnDelete(priceList._id);
+    await priceListService.cascadeUnassignOnDelete(priceList._id, shop);
 
     res.status(200).json({ message: "Price list deleted" });
   } catch (err) {
@@ -123,13 +134,311 @@ async function upsertItems(req, res, next) {
       return res.status(400).json({ message: "items must be an array" });
     }
 
-    const priceList = await priceListService.replaceItems(req.params.id, items);
+    const priceList = await priceListService.replaceItems(req.params.id, items, req.user.shop);
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    res.status(200).json(priceList);
+    const shopifySync = await autoSyncToShopify(priceList);
+
+    res.status(200).json({ ...priceList.toObject(), shopifySync });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function upsertItemForProduct(req, res, next) {
+  try {
+    const { price, minQuantity, unitOfMeasure, tiers } = req.body;
+
+    if (price === undefined || Number.isNaN(Number(price))) {
+      return res.status(400).json({ message: "price is required" });
+    }
+
+    const priceList = await priceListService.upsertItemForProduct(
+      req.params.id,
+      req.params.productId,
+      { price: Number(price), minQuantity: Number(minQuantity) || 1, unitOfMeasure, tiers },
+      req.user.shop
+    );
+
+    if (!priceList) {
+      return res.status(404).json({ message: "Price list not found" });
+    }
+
+    const shopifySync = await autoSyncToShopify(priceList);
+
+    res.status(200).json({ ...priceList.toObject(), shopifySync });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function removeItemForProduct(req, res, next) {
+  try {
+    const priceList = await priceListService.removeItemForProduct(
+      req.params.id,
+      req.params.productId,
+      req.user.shop
+    );
+
+    if (!priceList) {
+      return res.status(404).json({ message: "Price list not found" });
+    }
+
+    const shopifySync = await autoSyncToShopify(priceList);
+
+    res.status(200).json({ ...priceList.toObject(), shopifySync });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function performShopifyPush(priceListId, shop) {
+  const priceList = await PriceList.findOne({ _id: priceListId, shop }).populate(
+    "items.product",
+    "shopifyVariantId msrp name",
+  );
+
+  if (!priceList) {
+    return { ok: false, statusCode: 404, message: "Price list not found" };
+  }
+
+  if (priceList.pricingType !== "manual") {
+    return {
+      ok: false,
+      statusCode: 400,
+      message: "Only manual pricing price lists can be pushed to Shopify",
+    };
+  }
+
+  const pricedItems = priceList.items.filter((item) => item.product?.shopifyVariantId);
+
+  if (pricedItems.length === 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      message: "None of this price list's products are linked to Shopify",
+    };
+  }
+
+  const prices = pricedItems.map((item) => ({
+    variantId: item.product.shopifyVariantId,
+    amount: String(item.price),
+    // Full quantity-break schedule for this variant on this price list —
+    // admin-frontend stores this on the wholesale_price metafield so
+    // checkout/storefront can pick the right tier for the ordered quantity.
+    tiers: [
+      { minQuantity: item.minQuantity || 1, price: item.price },
+      ...(item.tiers || []).map((t) => ({ minQuantity: t.minQuantity, price: t.price })),
+    ].sort((a, b) => a.minQuantity - b.minQuantity),
+  }));
+
+  const currentVariantIds = prices.map((p) => p.variantId);
+
+  const customers = await Customer.find({
+    shop: priceList.shop,
+    priceList: priceList._id,
+    shopifyCustomerId: { $exists: true, $ne: null },
+  });
+  const currentCustomerIds = customers.map((c) => c.shopifyCustomerId);
+  const previousCustomerIds = priceList.shopifyPushedCustomerIds || [];
+  const addCustomerIds = currentCustomerIds.filter((id) => !previousCustomerIds.includes(id));
+  const removeCustomerIds = previousCustomerIds.filter(
+    (id) => !currentCustomerIds.includes(id),
+  );
+
+  const adminFrontendUrl = getAdminFrontendUrl();
+  if (!adminFrontendUrl) {
+    return { ok: false, statusCode: 500, message: "ADMIN_FRONTEND_URL is not configured" };
+  }
+
+  try {
+    const pushRes = await fetch(`${adminFrontendUrl}/internal/price-lists/push`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-api-key": process.env.INTERNAL_API_KEY,
+      },
+      body: JSON.stringify({
+        shop: priceList.shop,
+        priceListName: priceList.name,
+        currency: priceList.currency,
+        tag: B2B_BASE_TAG,
+        prices,
+        previousVariantIds: priceList.shopifyPushedVariantIds || [],
+        addCustomerIds,
+        removeCustomerIds,
+      }),
+    });
+
+    const result = await pushRes.json().catch(() => ({}));
+
+    if (!pushRes.ok || result.error) {
+      priceList.shopifyPushError = result.error || result.message || "Push to Shopify failed";
+      await priceList.save();
+      return { ok: false, statusCode: 400, message: priceList.shopifyPushError };
+    }
+
+    // Customers whose tag add/remove call failed on Shopify's side aren't
+    // actually tagged yet — excluding them here (instead of trusting
+    // currentCustomerIds blindly) means the next push retries them, rather
+    // than silently treating a failed tag write as done forever.
+    const failedTagCustomerIds = new Set(result.failedTagCustomerIds || []);
+    if (failedTagCustomerIds.size > 0) {
+      console.error(
+        `[priceList] tag sync failed for ${failedTagCustomerIds.size} customer(s) on "${priceList.name}" — will retry on next push`,
+        [...failedTagCustomerIds],
+      );
+    }
+
+    priceList.shopifyPushedVariantIds = currentVariantIds;
+    priceList.shopifyPushedCustomerIds = currentCustomerIds.filter(
+      (id) => !failedTagCustomerIds.has(id),
+    );
+    priceList.shopifyPushedAt = new Date();
+    priceList.shopifyPushError = undefined;
+    await priceList.save();
+
+    return { ok: true, priceList };
+  } catch (err) {
+    console.error("[performShopifyPush] push error:", err.message);
+    priceList.shopifyPushError = err.message;
+    await priceList.save().catch(() => {});
+    return { ok: false, statusCode: 500, message: err.message };
+  }
+}
+
+async function autoSyncToShopify(priceList) {
+  if (priceList.pricingType !== "manual") {
+    return { attempted: false };
+  }
+
+  try {
+    const result = await performShopifyPush(priceList._id, priceList.shop);
+
+    if (!result.ok && result.statusCode === 400 && /linked to Shopify/.test(result.message)) {
+      return { attempted: false };
+    }
+
+    return { attempted: true, ok: result.ok, message: result.ok ? undefined : result.message };
+  } catch (err) {
+    console.warn("[autoSyncToShopify] error:", err.message);
+    return { attempted: false, error: err.message };
+  }
+}
+
+async function bulkImportPriceLists(req, res, next) {
+  try {
+    const shop = req.user.shop;
+    const { rows } = req.body;
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ message: "rows must be a non-empty array" });
+    }
+
+    const validRows = rows.filter(
+      (r) => r.priceListSlug && r.sku && !Number.isNaN(Number(r.price)),
+    );
+
+    if (validRows.length === 0) {
+      return res.status(400).json({ message: "No valid rows to import" });
+    }
+
+    const skus = [...new Set(validRows.map((r) => r.sku))];
+    const products = await Product.find({ sku: { $in: skus }, shop });
+    const productIdBySku = new Map(products.map((p) => [p.sku, String(p._id)]));
+
+    const rowsBySlug = new Map();
+    for (const row of validRows) {
+      const slug = slugify(row.priceListSlug);
+      if (!rowsBySlug.has(slug)) rowsBySlug.set(slug, []);
+      rowsBySlug.get(slug).push(row);
+    }
+
+    let priceListsCreated = 0;
+    let priceListsUpdated = 0;
+    let itemsUpdated = 0;
+    const affectedPriceLists = [];
+
+    for (const [handle, priceListRows] of rowsBySlug) {
+      let priceList = await PriceList.findOne({ handle, shop });
+
+      if (!priceList) {
+        priceList = await PriceList.create({
+          name: handle,
+          handle,
+          currency: priceListRows[0].currency || "USD",
+          status: "draft",
+          pricingType: "manual",
+          shop,
+        });
+        priceListsCreated += 1;
+      } else {
+        priceListsUpdated += 1;
+      }
+
+      const itemsByProduct = new Map(
+        priceList.items.map((item) => [String(item.product), item.price]),
+      );
+
+      for (const row of priceListRows) {
+        const productId = productIdBySku.get(row.sku);
+        if (!productId) continue;
+        itemsByProduct.set(productId, Number(row.price));
+        itemsUpdated += 1;
+      }
+
+      priceList.items = [...itemsByProduct.entries()].map(([product, price]) => ({
+        product,
+        price,
+      }));
+      await priceList.save();
+      affectedPriceLists.push(priceList);
+    }
+
+    for (const priceList of affectedPriceLists) {
+      await autoSyncToShopify(priceList);
+    }
+
+    res.status(200).json({
+      priceListsCreated,
+      priceListsUpdated,
+      itemsUpdated,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function retryFailedShopifyPushes() {
+  const failed = await PriceList.find({
+    pricingType: "manual",
+    shopifyPushError: { $exists: true, $ne: null },
+  });
+
+  for (const priceList of failed) {
+    const result = await performShopifyPush(priceList._id, priceList.shop);
+    if (result.ok) {
+      console.log(`[priceList] retry push succeeded for "${priceList.name}"`);
+    } else {
+      console.error(`[priceList] retry push failed for "${priceList.name}": ${result.message}`);
+    }
+  }
+
+  return { retried: failed.length };
+}
+
+async function pushToShopify(req, res, next) {
+  try {
+    const result = await performShopifyPush(req.params.id, req.user.shop);
+
+    if (!result.ok) {
+      return res.status(result.statusCode).json({ message: result.message });
+    }
+
+    res.status(200).json(result.priceList);
   } catch (err) {
     next(err);
   }
@@ -137,21 +446,23 @@ async function upsertItems(req, res, next) {
 
 async function assignCustomers(req, res, next) {
   try {
+    const shop = req.user.shop;
     const { customerIds } = req.body;
 
     if (!Array.isArray(customerIds)) {
       return res.status(400).json({ message: "customerIds must be an array" });
     }
 
-    const priceList = await PriceList.findById(req.params.id);
+    const priceList = await PriceList.findOne({ _id: req.params.id, shop });
 
     if (!priceList) {
       return res.status(404).json({ message: "Price list not found" });
     }
 
-    const customers = await priceListService.assignCustomers(req.params.id, customerIds);
+    const customers = await priceListService.assignCustomers(req.params.id, customerIds, shop);
+    const shopifySync = await autoSyncToShopify(priceList);
 
-    res.status(200).json({ customers });
+    res.status(200).json({ customers, shopifySync });
   } catch (err) {
     next(err);
   }
@@ -164,5 +475,11 @@ module.exports = {
   updatePriceList,
   deletePriceList,
   upsertItems,
+  upsertItemForProduct,
+  removeItemForProduct,
   assignCustomers,
+  pushToShopify,
+  autoSyncToShopify,
+  retryFailedShopifyPushes,
+  bulkImportPriceLists,
 };
